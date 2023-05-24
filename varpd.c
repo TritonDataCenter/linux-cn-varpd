@@ -28,6 +28,7 @@
 #include <linux/if.h>
 #include <linux/if_link.h>
 #include <linux/rtnetlink.h>
+#include <linux/netlink.h>
 
 /* Globals...  */
 int netlink_fd;
@@ -48,9 +49,36 @@ dump16(uint8_t *msg)
 static void
 process_netlink_msg(uint8_t *msg, size_t msgsize)
 {
+	struct nlmsghdr *nlmsg = (struct nlmsghdr *)msg;
+
+#if 0
 	(void) printf("YES! Got netlink msg 0x%p, %d bytes, first 16 bytes:\n",
 	    msg, msgsize);
 	dump16(msg);
+#endif
+
+	if (msgsize != nlmsg->nlmsg_len) {
+		(void) printf("Hmm, msgsize %d != nlmsg_len %d, continuing...",
+		    msgsize, nlmsg->nlmsg_len);
+		/*
+		 * XXX KEBE ASKS can we get two messages in one recv()?
+		 * XXX KEBE ALSO ASKS can we get partial messages and need to
+		 * recv()/read() more?
+		 */
+	}
+
+	/* XXX KEBE ASKS perform reality checks here? */
+
+	switch (nlmsg->nlmsg_type) {
+	case RTM_GETNEIGH:
+		(void) printf("RTM_GETNEIGH\n");
+		/* XXX KEBE SAYS CONTINUE HERE WITH GETNEIGH... */
+		break;
+	default:
+		(void) printf("Message type %d/0x%x\n", nlmsg->nlmsg_type,
+			nlmsg->nlmsg_type);
+		break;
+	}
 }
 
 
