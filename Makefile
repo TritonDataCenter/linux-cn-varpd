@@ -8,11 +8,11 @@
 # Copyright 2023 MNX Cloud, Inc.
 #
 
-varpd: varpd.o
-	cc -o varpd varpd.o
+varpd-trainer: varpd-trainer.o
+	cc -o varpd-trainer varpd-trainer.o
 
 varpd.o: varpd.c
-	cc -c varpd.c
+	cc -c varpd-trainer.c
 
 clean clobber:
-	/bin/rm -f varpd varpd.o
+	/bin/rm -f varpd-trainer varpd-trainer.o
