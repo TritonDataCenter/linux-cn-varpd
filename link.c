@@ -9,7 +9,14 @@
  */
 
 #include <stdbool.h>
+#include <unistd.h>
 #include <err.h>
+
+#include <linux/sockios.h>
+#include <linux/if.h>
+#include <linux/if_link.h>
+#include <linux/rtnetlink.h>
+#include <linux/netlink.h>
 
 #include "link.h"
 
@@ -31,5 +38,30 @@ replumb_links(const char *filename)
 int
 new_netlink(void)
 {
-	return (-1);  /* XXX KEBE SAYS placeholder */
+	struct sockaddr_nl kernel_nladdr = {
+	    .nl_family = AF_NETLINK,
+	    .nl_groups = (RTMGRP_LINK | RTMGRP_IPV4_ROUTE | RTMGRP_NEIGH),
+	    .nl_pid = getpid()
+	};
+	int netlink_fd;
+
+	/*
+	 * XXX KEBE ASKS - is NETLINK_ROUTE with the above RTMGRP_* flags
+	 * sufficient to get everything we need?
+	 */
+	netlink_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+	if (netlink_fd == -1) {
+		warnx("socket(AF_NETLINK)");
+		return (-1);
+	}
+
+	if (bind(netlink_fd, (struct sockaddr *)&kernel_nladdr,
+	    sizeof (kernel_nladdr)) != -1) {
+		return (netlink_fd);
+	} else
+		err(-1, "bind()");
+
+fail:
+	(void) close(netlink_fd);
+	return (-1);
 }

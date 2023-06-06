@@ -90,10 +90,6 @@ main(int argc, char *argv[])
 	if (!plumb_links(nicfile))
 		errx(-1, "plumb_links() failed.\n");
 
-	/* Set up HUP handler... */
-	if (sigaction(SIGHUP, &sigact, NULL) == -1)
-		err(-2, "sigaction(): ");
-
 	/*
 	 * Because of multiple failure modes, new_svp() will print
 	 * diagnostics.
@@ -109,6 +105,10 @@ main(int argc, char *argv[])
 	netlink_fd = new_netlink();
 	if (netlink_fd == -1)
 		errx(-4, "netlink failure");
+
+	/* Set up HUP handler... */
+	if (sigaction(SIGHUP, &sigact, NULL) == -1)
+		err(-2, "sigaction(): ");
 
 	/*
 	 * XXX KEBE SAYS eventually do select() loop here on netlink_fd and

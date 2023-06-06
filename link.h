@@ -19,6 +19,7 @@ extern "C" {
 
 extern bool plumb_links(const char *);
 extern void replumb_links(const char *);
+extern int new_netlink(void);
 
 #ifdef __cplusplus
 }
