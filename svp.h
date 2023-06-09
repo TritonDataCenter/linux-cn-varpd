@@ -18,7 +18,9 @@ extern "C" {
 #endif
 
 extern int new_svp(struct sockaddr_in *);
-
+extern void handle_svp_inbound(int);
+extern void send_l3_req(int32_t, uint8_t, uint8_t *);
+extern void send_l2_req(int32_t, uint64_t);
 #ifdef __cplusplus
 }
 #endif

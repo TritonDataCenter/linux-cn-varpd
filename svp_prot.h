@@ -14,11 +14,13 @@
  */
 
 /*
- * NOTE: Except for this comment block and removals of include files, this
- * file MUST be in synch with
+ * NOTE: This file MUST have its same-named fields and consts be in synch with
  * illumos-joyent/usr/src/lib/varpd/svp/common/libvarpd_svp_prot.h and updates
  * there MUST be reflected here.  This project MUST not change the upstream
  * version of this file without a strong justification for SmartOS.
+ *
+ * This project MAY have local modifications to help the Linux CN side along.
+ * e.g. ETHERADDRL below.
  */
 
 #ifndef _SVP_PROT_H
@@ -32,7 +34,14 @@
 #include <inttypes.h>
 #include <netinet/in.h>
 
+/* These are stolen from other illumos header files. */
 #define	ETHERADDRL 6 /* Ethernet address length. */
+#define IN6_INADDR_TO_V4MAPPED(v4, v6) \
+        ((v6)->s6_addr32[3] = (v4)->s_addr, \
+        (v6)->s6_addr32[2] = 0xffff0000U, \
+        (v6)->s6_addr32[1] = 0, \
+        (v6)->s6_addr32[0] = 0)
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,6 +96,12 @@ typedef struct svp_vl2_req {
 	uint8_t		sl2r_pad[2];
 	uint32_t	sl2r_vnetid;
 } svp_vl2_req_t;
+
+/* For easy copy of MAC from a uint64_t */
+typedef struct svp_vl2_req64 {
+	uint64_t	sl2r64_mac_and_pad;	/* Mind byte-order here!!! */
+	uint32_t	sl2r64_vnetid;
+} svp_vl2_req64_t;
 
 /*
  * This is the message a server uses to reply to the SVP_R_VL2_REQ.  If the

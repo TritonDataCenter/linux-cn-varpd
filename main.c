@@ -15,6 +15,7 @@
 #include <err.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <poll.h>
 
 #include "svp.h"
 #include "link.h"
@@ -47,7 +48,7 @@ int
 main(int argc, char *argv[])
 {
 	uint16_t newport;
-	int optchar, svp_fd, netlink_fd;
+	int optchar, svp_fd, netlink_fd, pollrc;
 	struct sockaddr_in svp_sin = {
 		.sin_family = AF_INET,
 		.sin_port = htons(SVP_PORT),
@@ -56,6 +57,7 @@ main(int argc, char *argv[])
 		.sa_handler = do_sighup,
 		
 	};
+	struct pollfd fds[2];
 
 	while ((optchar = getopt(argc, argv, "f:p:a:")) != EOF) {
 		switch (optchar) {
@@ -111,13 +113,31 @@ main(int argc, char *argv[])
 		err(-2, "sigaction(): ");
 
 	/*
-	 * XXX KEBE SAYS eventually do select() loop here on netlink_fd and
-	 * svp_fd.
+	 * XXX KEBE SAYS build poll() loop here on netlink_fd and svp_fd.
 	 */
+	fds[0].fd = svp_fd;
+	fds[0].events = POLLIN;
+	fds[0].revents = 0;
+	fds[1].fd = netlink_fd;
+	fds[1].events = POLLIN;
+	fds[1].revents = 0;
+	do {
+		pollrc = poll(fds, 2, 60);	/* 60sec timeout? */
+		if (pollrc <= 0)
+			continue;	/* Will hit while-end and stop if -1. */
+		/* svp_fd */
+		if (fds[0].revents != 0) {
+			handle_svp_inbound(svp_fd);
+			fds[0].revents = 0;
+		}
 
-	/* XXX KEBE SAYS cheesy placeholder... */
-	(void) printf("Okay, we're good: svp_fd == %d, netlink_fd == %d\n",
-	    svp_fd, netlink_fd);
-	(void) gets(&optchar, sizeof (optchar), stdin);
-	exit(0);
+		/* netlink_fd */
+		if (fds[1].revents != 0) {
+			handle_netlink_inbound(netlink_fd);
+			fds[1].revents = 0;
+		}
+	} while (pollrc != -1);
+	
+	warnx("poll() failure");
+	exit(1);
 }

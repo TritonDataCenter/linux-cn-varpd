@@ -17,7 +17,7 @@ varpd: $(OBJECTS)
 
 $(OBJECTS): %.o: %.c
 
-varpd-trainer: varpd-trainer.o
+varpd-trainer: varpd-trainer.c
 	cc -o varpd-trainer varpd-trainer.c
 
 clean clobber:

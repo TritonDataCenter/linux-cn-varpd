@@ -8,12 +8,111 @@
  * Copyright 2023 MNX Cloud, Inc.
  */
 
+#include <unistd.h>
 #include <err.h>
+#include <assert.h>
+#include <string.h>
+#include <stdlib.h>
+#include <netinet/in.h>
 
 #include "svp.h"
 #include "crc32.h"
 
 static uint32_t svp_crc32_tab[] = { CRC32_TABLE };
+
+static uint32_t our_svp_id = 1;	/* Will never be 0 */
+
+typedef union svp_remotereq {
+	svp_req_t svprr_head;
+	struct {
+		svp_req_t l3head;
+		svp_vl3_req_t l3req;
+	} svprr_l3r;
+	struct {
+		svp_req_t l2head;
+		union {
+			svp_vl2_req64_t l2r64;
+			svp_vl2_req_t l2r;
+		} l2req;
+	} svprr_l2r;
+} svp_remotereq_t;
+#define	svprr_ver svprr_head.svp_ver
+#define	svprr_op svprr_head.svp_op
+#define	svprr_size svprr_head.svp_size
+#define	svprr_id svprr_head.svp_id
+#define	svprr_crc32 svprr_head.svp_crc32
+#define	svprr_l3r_ip svprr_l3r.l3req.sl3r_ip
+#define	svprr_l3r_type svprr_l3r.l3req.sl3r_type
+#define	svprr_l3r_vnetid svprr_l3r.l3req.sl3r_vnetid
+#define	svprr_l2r_macandpad svprr_l2r.l2req.l2r64.sl2r64_mac_and_pad
+#define	svprr_l2r_vnetid svprr_l2r.l2req.l2r.sl2r_vnetid
+
+typedef struct svp_transaction {
+	/* XXX BEGIN LINKAGE XXX */
+
+	/* Sigh... linux has nothing good like libavl so just list it for now. */
+	struct svp_transaction **svpt_ptpn;  /* Must be first! */
+	struct svp_transaction *svpt_next;
+
+	/* XXX END LINKAGE XXX */
+	svp_remotereq_t svpt_rr;
+	int32_t svpt_index;
+} svp_transaction_t;
+#define	svpt_id svpt_rr.svprr_head.svp_id
+
+svp_transaction_t *transaction_head = NULL, *transaction_tail = NULL;
+
+/* Tail insert for now. */
+static void
+insert_transaction(svp_transaction_t *svpt)
+{
+	svpt->svpt_next = NULL;
+	if (transaction_tail == NULL) {
+		svpt->svpt_ptpn = &transaction_head;
+	} else {
+		transaction_tail->svpt_next = svpt;
+		svpt->svpt_ptpn = &transaction_tail->svpt_next;
+	}
+	*(svpt->svpt_ptpn) = svpt;
+	transaction_tail = svpt;
+}
+
+static void
+remove_transaction(svp_transaction_t *svpt)
+{
+	*(svpt->svpt_ptpn) = svpt->svpt_next;
+	if (svpt->svpt_next != NULL) {
+		svpt->svpt_next->svpt_ptpn = svpt->svpt_ptpn;
+		svpt->svpt_next = NULL;
+	} else {
+		assert(transaction_tail == svpt);
+		if (transaction_head == transaction_tail) {
+			/* Final node out! */
+			transaction_head = transaction_tail = NULL;
+		} else {
+			transaction_tail =
+			    (svp_transaction_t *)(&svpt->svpt_ptpn);
+		}
+	}
+	svpt->svpt_ptpn = NULL;
+}
+
+/* Remove from list before we return. */
+static svp_transaction_t *
+find_transaction(uint32_t svp_id)
+{
+	svp_transaction_t *svpt;
+
+	for (svpt = transaction_head; svpt != NULL; svpt = svpt->svpt_next) {
+		if (svpt->svpt_id == svp_id)
+			break;
+	}
+
+	if (svpt != NULL)
+		remove_transaction(svpt);
+
+	return (svpt);
+}
 
 int
 new_svp(struct sockaddr_in *svp_sin)
@@ -41,9 +140,10 @@ new_svp(struct sockaddr_in *svp_sin)
 	/* Send an SVP ping message to confirm things. */
 	svp.svp_ver = htons(SVP_CURRENT_VERSION);
 	svp.svp_op = htons(SVP_R_PING);
-	svp.svp_size = 0; /* XXX KEBE SAYS CONFIRM size excludes header... */
+	svp.svp_size = 0;
 	svp.svp_id = htons(1);
 	svp.svp_crc32 = 0;
+	/* XXX KEBE SAYS WE NEED a crc32()-over-whole-packet function. */
 	CRC32(crc_val, (uint8_t *)(&svp), sizeof (svp), crc_val, svp_crc32_tab);
 	crc_val = ~crc_val;
 	svp.svp_crc32 = htonl(crc_val);
@@ -83,7 +183,7 @@ new_svp(struct sockaddr_in *svp_sin)
 	}
 
 	if (svp.svp_op == htons(SVP_R_PONG)) {
-		(void) printf("All good to go!\n");
+		/* (void) printf("All good to go!\n"); */
 		return (svp_fd);
 	} else {
 		warnx("Message type mismatch, got %d, expected %d",
@@ -93,4 +193,51 @@ new_svp(struct sockaddr_in *svp_sin)
 fail:
 	(void) close(svp_fd);
 	return (-1);
+}
+
+/*
+ * Extract ONE message from SVP
+ */
+void
+handle_svp_inbound(int svp_fd)
+{
+}
+
+/*
+ * Send an SVP_R_VL3_REQ
+ */
+void
+send_l3_req(int32_t index, uint8_t af, uint8_t *addr)
+{
+	svp_transaction_t *svpt;
+	svp_remotereq_t *svprr;
+
+	svpt = calloc(1, sizeof (*svpt));
+	if (svpt == NULL)
+		errx(-10, "send_l3_req() - allocation failed\n");
+
+	svpt->svpt_index = index;
+	svprr = &svpt->svpt_rr;
+
+	svprr->svprr_ver = SVP_CURRENT_VERSION;
+	svprr->svprr_op = htons(SVP_R_VL3_REQ);
+	svprr->svprr_size = htonl(sizeof (svp_vl3_req_t));
+	if (our_svp_id == 0)
+		our_svp_id = 1;
+	svprr->svprr_id = our_svp_id++;
+
+	memcpy(svprr->svprr_l3r_ip, addr, sizeof (struct in6_addr));
+	/* Uggh, KEBE SAYS need index-to-vnetid, or passed in vnetid. */
+	/* svprr_svprr_l3r_vnetid = index_to_vnetid(index); */
+	svprr->svprr_l3r_type = (af == AF_INET6) ? SVP_VL3_IPV6 : SVP_VL3_IP;
+
+	
+}
+
+/*
+ * Send an SVP_R_VL2_REQ
+ */
+void
+send_l2_req(int32_t index, uint64_t mac_and_pad)
+{
 }
