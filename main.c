@@ -44,11 +44,14 @@ do_sighup(int sig)
 	replumb_links(nicfile);
 }
 
+/* Keep this global... */
+int svp_fd, netlink_fd;
+
 int
 main(int argc, char *argv[])
 {
 	uint16_t newport;
-	int optchar, svp_fd, netlink_fd, pollrc;
+	int optchar, pollrc;
 	struct sockaddr_in svp_sin = {
 		.sin_family = AF_INET,
 		.sin_port = htons(SVP_PORT),

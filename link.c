@@ -65,7 +65,7 @@ new_netlink(void)
 	} else
 		err(-1, "bind()");
 
-fail:
+	/* Should never reach... */
 	(void) close(netlink_fd);
 	return (-1);
 }
@@ -93,7 +93,7 @@ handle_netlink_inbound(int netlink_fd)
 		errx(-7, "recv(netlink)");
 
 	if (recvsize != nlmsg->nlmsg_len) {
-		warn("DANGER: recvsize %d != nlmsg_len %d, "
+		warn("DANGER: recvsize %ld != nlmsg_len %d, "
 		    "continuing...\n", recvsize, nlmsg->nlmsg_len);
 		/* Continue for now... */
 	}
@@ -126,13 +126,13 @@ handle_netlink_inbound(int netlink_fd)
 		/* Right now assume NUD_INCOMPLETE is our only trigger. */
 		if (ndm->ndm_state != NUD_INCOMPLETE) {
 			/* Handle better? */
-			warn("Unknown ndm_state %0x%x\n", ndm->ndm_state);
+			warn("Unknown ndm_state 0x%x\n", ndm->ndm_state);
 			return;
 		}
 		/* Right now assume NDA_DST is our only trigger. */
 		if (ndm->ndm_type != NDA_DST) {
 			/* Handle better? */
-			warn("Unknown ndm_type %0x%x\n", ndm->ndm_type);
+			warn("Unknown ndm_type 0x%x\n", ndm->ndm_type);
 			return;
 		}
 		/* XXX KEBE ASKS WTF are the flags for?!? */
@@ -143,8 +143,9 @@ handle_netlink_inbound(int netlink_fd)
 			struct rtattr *thisone = (struct rtattr *)readspot;
 
 			rtas[thisone->rta_type] = thisone;
-			warn("rta_type %d, rta_len = %d, advancing %d bytes\n",
-			    thisone->rta_len, RTA_ALIGN(thisone->rta_len));
+			warn("rta_type %d, rta_len = %d, advancing %u bytes\n",
+			    thisone->rta_type, thisone->rta_len,
+			    RTA_ALIGN(thisone->rta_len));
 			readspot += RTA_ALIGN(thisone->rta_len);
 		}
 

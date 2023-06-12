@@ -10,6 +10,8 @@
 
 OBJECTS = link.o main.o svp.o
 
+CFLAGS += -Wall
+
 all: varpd
 
 varpd: $(OBJECTS)

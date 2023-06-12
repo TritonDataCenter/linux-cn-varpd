@@ -18,9 +18,8 @@
 #include "svp.h"
 #include "crc32.h"
 
-static uint32_t svp_crc32_tab[] = { CRC32_TABLE };
-
 static uint32_t our_svp_id = 1;	/* Will never be 0 */
+extern int svp_fd;
 
 typedef union svp_remotereq {
 	svp_req_t svprr_head;
@@ -59,6 +58,23 @@ typedef struct svp_transaction {
 	int32_t svpt_index;
 } svp_transaction_t;
 #define	svpt_id svpt_rr.svprr_head.svp_id
+
+static uint32_t svp_crc32_tab[] = { CRC32_TABLE };
+
+/*
+ * Self-conntained return of a complete, but not wire-ready, CRC32 value.
+ */
+uint32_t
+svp_crc(void *pkt, size_t len)
+{
+	/* Use -1 as the initial crc32 value at the beginning. */
+	uint32_t crc_val = -1;
+
+	assert(((svp_req_t *)pkt)->svp_crc32 == 0);
+
+	CRC32(crc_val, (uint8_t *)pkt, len, crc_val, svp_crc32_tab);
+	return (~crc_val);
+}
 
 svp_transaction_t *transaction_head = NULL, *transaction_tail = NULL;
 
@@ -120,7 +136,7 @@ new_svp(struct sockaddr_in *svp_sin)
 	int svp_fd;
 	svp_req_t svp;
 	/* Use -1 as the initial crc32 value at the beginning. */
-	uint32_t crc_val = -1, crc_holder;
+	uint32_t crc_holder, crc_val;
 	ssize_t sendrecv_rc;
 
 	/* Open a TCP connection to Triton's "Portolan" SVP service. */
@@ -141,12 +157,9 @@ new_svp(struct sockaddr_in *svp_sin)
 	svp.svp_ver = htons(SVP_CURRENT_VERSION);
 	svp.svp_op = htons(SVP_R_PING);
 	svp.svp_size = 0;
-	svp.svp_id = htons(1);
+	svp.svp_id = 0xffffffff;  /* Normal traffic starts at 1... */
 	svp.svp_crc32 = 0;
-	/* XXX KEBE SAYS WE NEED a crc32()-over-whole-packet function. */
-	CRC32(crc_val, (uint8_t *)(&svp), sizeof (svp), crc_val, svp_crc32_tab);
-	crc_val = ~crc_val;
-	svp.svp_crc32 = htonl(crc_val);
+	svp.svp_crc32 = htonl(svp_crc(&svp, sizeof (svp)));
 
 	sendrecv_rc = send(svp_fd, &svp, sizeof (svp), 0);
 	if (sendrecv_rc == -1) {
@@ -154,7 +167,7 @@ new_svp(struct sockaddr_in *svp_sin)
 		goto fail;
 	}
 	if (sendrecv_rc != sizeof (svp)) {
-		warnx("send(SVP PING) sent %d bytes not %d",
+		warnx("send(SVP PING) sent %ld bytes not %ld",
 		    sendrecv_rc, sizeof (svp));
 		goto fail;
 	}
@@ -165,16 +178,14 @@ new_svp(struct sockaddr_in *svp_sin)
 		goto fail;
 	}
 	if (sendrecv_rc != sizeof (svp)) {
-		warnx("recv(SVP PING) got %d bytes not %d",
+		warnx("recv(SVP PING) got %ld bytes not %ld",
 		    sendrecv_rc, sizeof (svp));
 		goto fail;
 	}
 
 	crc_holder = ntohl(svp.svp_crc32);
 	svp.svp_crc32 = 0;
-	crc_val = -1;
-	CRC32(crc_val, (uint8_t *)(&svp), sizeof (svp), crc_val, svp_crc32_tab);
-	crc_val = ~crc_val;
+	crc_val = svp_crc(&svp, sizeof (svp));
 	/* For now just reality check the op. */
 	if (crc_holder != crc_val) {
 		warnx("crc mismatch. Wire's == 0x%x, Ours == 0x%x",
@@ -201,6 +212,7 @@ fail:
 void
 handle_svp_inbound(int svp_fd)
 {
+	err(2, "send_l2_req() not yet built"); /* XXX KEBE SAYS FILL ME IN! */
 }
 
 /*
@@ -228,10 +240,17 @@ send_l3_req(int32_t index, uint8_t af, uint8_t *addr)
 
 	memcpy(svprr->svprr_l3r_ip, addr, sizeof (struct in6_addr));
 	/* Uggh, KEBE SAYS need index-to-vnetid, or passed in vnetid. */
-	/* svprr_svprr_l3r_vnetid = index_to_vnetid(index); */
+	svprr->svprr_l3r_vnetid = htonl(4385813); /* Hardcode for now... */
+	/* svprr->svprr_l3r_vnetid = index_to_vnetid(index); */
 	svprr->svprr_l3r_type = (af == AF_INET6) ? SVP_VL3_IPV6 : SVP_VL3_IP;
 
-	
+	if (send(svp_fd, svpt, sizeof (svp_req_t) + sizeof (svp_vl3_req_t), 0)
+	    == -1) {
+		warnx("send_l3_req: send()");
+		free(svpt);
+		return;
+	}
+	insert_transaction(svpt);
 }
 
 /*
@@ -240,4 +259,5 @@ send_l3_req(int32_t index, uint8_t af, uint8_t *addr)
 void
 send_l2_req(int32_t index, uint64_t mac_and_pad)
 {
+	err(2, "send_l2_req() not yet built"); /* XXX KEBE SAYS FILL ME IN! */
 }
