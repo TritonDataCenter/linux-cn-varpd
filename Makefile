@@ -10,7 +10,8 @@
 
 OBJECTS = link.o main.o svp.o
 
-CFLAGS += -Wall
+CFLAGS += -m64 -Wall
+# CFLAGS += -g
 
 all: varpd
 

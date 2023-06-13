@@ -138,12 +138,12 @@ handle_netlink_inbound(int netlink_fd)
 		/* XXX KEBE ASKS WTF are the flags for?!? */
 
 		/* Anyway, on to parsing the extensions. */
-		readspot = (uint8_t *)(sizeof (*nlmsg) + sizeof (*ndm));
+		readspot += sizeof (*nlmsg) + sizeof (*ndm);
 		while (readspot < endspot) {
 			struct rtattr *thisone = (struct rtattr *)readspot;
 
 			rtas[thisone->rta_type] = thisone;
-			warn("rta_type %d, rta_len = %d, advancing %u bytes\n",
+			warn("rta_type %d, rta_len = %d, advancing %u bytes",
 			    thisone->rta_type, thisone->rta_len,
 			    RTA_ALIGN(thisone->rta_len));
 			readspot += RTA_ALIGN(thisone->rta_len);
@@ -166,18 +166,21 @@ handle_netlink_inbound(int netlink_fd)
 			struct in6_addr v6addr;
 
 			/* Uggh, SVP requires v4mapped... do it here. */
+			warn("Sending l3 req");
 			IN6_INADDR_TO_V4MAPPED(
 			    (struct in_addr *)RTA_DATA(rtas[RTA_DST]), &v6addr);
 			send_l3_req(ndm->ndm_ifindex, AF_INET, v6addr.s6_addr);
 			break;
 		}
 		case AF_INET6:
+			warn("Sending l3 req (v6)");
 			send_l3_req(ndm->ndm_ifindex, AF_INET6,
 			    RTA_DATA(rtas[RTA_DST]));
 			break;
 		case AF_PACKET: {
 			uint64_t arg = 0;
 
+			warn("Sending l2 req");
 			memcpy(&arg, RTA_DATA(rtas[RTA_DST]), ETHERADDRL);
 			/* Cheesy use of 64-bit ints for MAC. */
 			send_l2_req(ndm->ndm_ifindex, arg);

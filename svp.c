@@ -13,6 +13,7 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <netinet/in.h>
 
 #include "svp.h"
@@ -34,17 +35,38 @@ typedef union svp_remotereq {
 			svp_vl2_req_t l2r;
 		} l2req;
 	} svprr_l2r;
+	struct {
+		svp_req_t l3head;
+		svp_vl3_ack_t l3ack;
+	} svprr_l3a;
+	struct {
+		svp_req_t l2head;
+		svp_vl2_ack_t l2ack;
+	} svprr_l2a;
 } svp_remotereq_t;
+
 #define	svprr_ver svprr_head.svp_ver
 #define	svprr_op svprr_head.svp_op
 #define	svprr_size svprr_head.svp_size
 #define	svprr_id svprr_head.svp_id
 #define	svprr_crc32 svprr_head.svp_crc32
+
 #define	svprr_l3r_ip svprr_l3r.l3req.sl3r_ip
 #define	svprr_l3r_type svprr_l3r.l3req.sl3r_type
 #define	svprr_l3r_vnetid svprr_l3r.l3req.sl3r_vnetid
+
 #define	svprr_l2r_macandpad svprr_l2r.l2req.l2r64.sl2r64_mac_and_pad
+#define	svprr_l2r_mac svprr_l2r.l2req.l2r.sl2r_mac
 #define	svprr_l2r_vnetid svprr_l2r.l2req.l2r.sl2r_vnetid
+
+#define	svprr_l3a_status svprr_l3a.l3ack.sl3a_status
+#define	svprr_l3a_mac svprr_l3a.l3ack.sl3a_mac
+#define	svprr_l3a_port svprr_l3a.l3ack.sl3a_uport
+#define	svprr_l3a_ip svprr_l3a.l3ack.sl3a_uip
+
+#define	svprr_l2a_status svprr_l2a.l2ack.sl2a_status
+#define	svprr_l2a_port svprr_l2a.l2ack.sl2a_port
+#define	svprr_l2a_ip svprr_l2a.l2ack.sl2a_addr
 
 typedef struct svp_transaction {
 	/* XXX BEGIN LINKAGE XXX */
@@ -84,6 +106,7 @@ insert_transaction(svp_transaction_t *svpt)
 {
 	svpt->svpt_next = NULL;
 	if (transaction_tail == NULL) {
+		assert(transaction_head == NULL);
 		svpt->svpt_ptpn = &transaction_head;
 	} else {
 		transaction_tail->svpt_next = svpt;
@@ -101,11 +124,13 @@ remove_transaction(svp_transaction_t *svpt)
 		svpt->svpt_next->svpt_ptpn = svpt->svpt_ptpn;
 		svpt->svpt_next = NULL;
 	} else {
+		/* Removing from the end. */
 		assert(transaction_tail == svpt);
-		if (transaction_head == transaction_tail) {
-			/* Final node out! */
-			transaction_head = transaction_tail = NULL;
+		if (transaction_head == NULL) {
+			/* Final node out! Cleared by first line already! */
+			transaction_tail = NULL;
 		} else {
+			/* works only if ptpn is first element in struct. */
 			transaction_tail =
 			    (svp_transaction_t *)(&svpt->svpt_ptpn);
 		}
@@ -113,7 +138,7 @@ remove_transaction(svp_transaction_t *svpt)
 	svpt->svpt_ptpn = NULL;
 }
 
-/* Remove from list before we return. */
+/* Remove from list before we return. Match on un-swapped ID. */
 static svp_transaction_t *
 find_transaction(uint32_t svp_id)
 {
@@ -128,6 +153,18 @@ find_transaction(uint32_t svp_id)
 		remove_transaction(svpt);
 
 	return (svpt);
+}
+
+static void
+set_overlay_mac(uint8_t *mac, uint16_t *port, uint8_t *addr)
+{
+	warn("Setting mac!");
+}
+
+static void
+set_overlay_ip(uint8_t *ip, uint8_t *mac)
+{
+	warn("Setting IP!");
 }
 
 int
@@ -206,13 +243,123 @@ fail:
 	return (-1);
 }
 
+/* Assuming input is off the wire. May want transaction too... */
+static bool
+status_check(uint32_t wire_status)
+{
+	switch (ntohl(wire_status)) {
+	case SVP_S_FATAL:
+		err(-19, "SVP server returned SVP_S_FATAL. Aborting.");
+		break;
+	case SVP_S_NOTFOUND:
+		/* This should be nominally silent. */
+		warn("Request not found...");
+		break;
+	case SVP_S_BADL3TYPE:
+		err(-18, "We apparently send a bad L3 type: not IPv4 or IPv6.");
+		break;
+	case SVP_S_BADBULK:
+		err(-17, "WTF are we doing with BADBULK?");
+		break;
+	case SVP_S_OK:
+		return (true);
+	default:
+		err(-20, "Invalid status value given: 0x%x\n",
+		    ntohl(wire_status));
+	}
+	return (false);
+}
+
 /*
  * Extract ONE message from SVP
  */
 void
 handle_svp_inbound(int svp_fd)
 {
-	err(2, "send_l2_req() not yet built"); /* XXX KEBE SAYS FILL ME IN! */
+	uint8_t buf[2048];
+	uint8_t *next = buf;
+	ssize_t recvlen = 0, payloadlen, chunk;
+	svp_remotereq_t *svprr = (svp_remotereq_t *)buf;
+	svp_req_t *svp_req = &svprr->svprr_head;
+	svp_transaction_t *svpt;
+
+	while (recvlen < sizeof (*svp_req)) {
+		chunk = recv(svp_fd, next, sizeof (*svp_req) - recvlen, 0);
+		if (chunk == -1)
+			errx(-13, "handle_svp_inbound: recv()");
+
+		recvlen += chunk;
+	}
+
+	/* Will a compiler save an actual call? */
+	assert(svp_req->svp_ver == ntohs(SVP_CURRENT_VERSION));
+	payloadlen = ntohl(svp_req->svp_size);
+	if (payloadlen + sizeof (*svp_req) > sizeof (buf)) {
+		err(-1, "Protocol issue: payload len %lu is more than %lu",
+		    payloadlen + sizeof (*svp_req), sizeof (buf));
+	}
+	next += sizeof (*svp_req);
+
+	while (payloadlen > 0) {
+		chunk = recv(svp_fd, next, payloadlen, 0);
+		if (chunk == -1)
+			errx(-13, "handle_svp_inbound: recv()");
+
+		payloadlen -= chunk;
+	}
+
+	svpt = find_transaction(svp_req->svp_id);
+	if (svpt == NULL) {
+		warn("handle_svp_inbound(): Can't find transaction 0x%u\n",
+		    svp_req->svp_id);
+		return;
+	}
+
+	/* Exploit REC/ACK adjacency for fun & profit... */
+	if (ntohs(svp_req->svp_op) - 1 != ntohs(svpt->svpt_rr.svprr_op)) {
+		warn("handle_svp_inbound(): req(0x%x)/ack(0x%x) mismatch",
+		    ntohs(svpt->svpt_rr.svprr_op), ntohs(svp_req->svp_op));
+		return;
+	}
+	switch (ntohs(svp_req->svp_op)) {
+	case SVP_R_VL2_ACK:
+		if (status_check(svprr->svprr_l2a_status)) {
+			set_overlay_mac(svpt->svpt_rr.svprr_l2r_mac,
+			    &svprr->svprr_l2a_port, svprr->svprr_l2a_ip);
+		}
+		break;
+	case SVP_R_VL3_ACK:
+		/*
+		 * Have answers for both:
+		 * Overlay MAC -> Underlay IP/port
+		 * AND
+		 * Overylay IP -> Overlay MAC.
+		 *
+		 * Set the Overlay MAC first, however.
+		 */
+		if (!status_check(svprr->svprr_l3a_status))
+			break;
+
+		set_overlay_mac(svprr->svprr_l3a_mac, &svprr->svprr_l3a_port,
+		    svprr->svprr_l3a_ip);
+		if (svpt->svpt_rr.svprr_l3r_type == ntohl(SVP_VL3_IP)) {
+			assert(
+			    IN6_IS_ADDR_V4MAPPED(svpt->svpt_rr.svprr_l3r_ip));
+		} else {
+			assert(svpt->svpt_rr.svprr_l3r_type ==
+			    ntohl(SVP_VL3_IPV6) &&
+			    !IN6_IS_ADDR_V4MAPPED(svpt->svpt_rr.svprr_l3r_ip));
+		}
+		set_overlay_ip(svpt->svpt_rr.svprr_l3r_ip,
+		    svprr->svprr_l3a_mac);
+		break;
+	default:
+		errx(-15, "handle_svp_inbound(): Should never reach, ack 0x%x "
+		    "unimplmented\n", ntohs(svp_req->svp_op));
+		break;
+	}
+
+	free(svpt);	/* We're done with the outstanding transaction. */
 }
 
 /*
@@ -231,7 +378,7 @@ send_l3_req(int32_t index, uint8_t af, uint8_t *addr)
 	svpt->svpt_index = index;
 	svprr = &svpt->svpt_rr;
 
-	svprr->svprr_ver = SVP_CURRENT_VERSION;
+	svprr->svprr_ver = htons(SVP_CURRENT_VERSION);
 	svprr->svprr_op = htons(SVP_R_VL3_REQ);
 	svprr->svprr_size = htonl(sizeof (svp_vl3_req_t));
 	if (our_svp_id == 0)
@@ -242,9 +389,13 @@ send_l3_req(int32_t index, uint8_t af, uint8_t *addr)
 	/* Uggh, KEBE SAYS need index-to-vnetid, or passed in vnetid. */
 	svprr->svprr_l3r_vnetid = htonl(4385813); /* Hardcode for now... */
 	/* svprr->svprr_l3r_vnetid = index_to_vnetid(index); */
-	svprr->svprr_l3r_type = (af == AF_INET6) ? SVP_VL3_IPV6 : SVP_VL3_IP;
+	svprr->svprr_l3r_type = (af == AF_INET6) ?
+	    htons(SVP_VL3_IPV6) : htonl(SVP_VL3_IP);
+	svprr->svprr_crc32 = 0;
+	svprr->svprr_crc32 =
+	    htonl(svp_crc(svprr, sizeof (svp_req_t) + sizeof (svp_vl3_req_t)));
 
-	if (send(svp_fd, svpt, sizeof (svp_req_t) + sizeof (svp_vl3_req_t), 0)
+	if (send(svp_fd, svprr, sizeof (svp_req_t) + sizeof (svp_vl3_req_t), 0)
 	    == -1) {
 		warnx("send_l3_req: send()");
 		free(svpt);
