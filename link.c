@@ -50,8 +50,8 @@ new_netlink(void)
 	int netlink_fd;
 
 	/*
-	 * XXX KEBE ASKS - is NETLINK_ROUTE with the above RTMGRP_* flags
-	 * sufficient to get everything we need?
+	 * NETLINK_ROUTE with the above RTMGRP_* flags should be sufficient to
+	 * get everything we need.
 	 */
 	netlink_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
 	if (netlink_fd == -1) {
@@ -159,7 +159,8 @@ handle_netlink_inbound(int netlink_fd)
 		 * Really I only need the NDA_DST to construct a portolan
 		 * request.  Do the delayed ndm_family check here as well.
 		 *
-		 * UGGGH, XXX KEBE SAYS WE NEED A 
+		 * We *do* need a way to convery the ifindex to a vnetid for
+		 * SVP, but we let the SVP functions handle that themselves.
 		 */
 		switch (ndm->ndm_family) {
 		case AF_INET: {

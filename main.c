@@ -115,9 +115,7 @@ main(int argc, char *argv[])
 	if (sigaction(SIGHUP, &sigact, NULL) == -1)
 		err(-2, "sigaction(): ");
 
-	/*
-	 * XXX KEBE SAYS build poll() loop here on netlink_fd and svp_fd.
-	 */
+	/* Build poll() loop here on netlink_fd and svp_fd. */
 	fds[0].fd = svp_fd;
 	fds[0].events = POLLIN;
 	fds[0].revents = 0;

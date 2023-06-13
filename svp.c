@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <netinet/in.h>
 
 #include "svp.h"
@@ -155,16 +156,65 @@ find_transaction(uint32_t svp_id)
 	return (svpt);
 }
 
+/* XXX KEBE ASKS, put these in link.c ? */
 static void
-set_overlay_mac(uint8_t *mac, uint16_t *port, uint8_t *addr)
+set_overlay_mac(uint8_t *mac, uint8_t *addr, char *nicname, uint16_t vid)
 {
+	char buf[1024];
+	char *cmd = buf;
+
 	warn("Setting mac!");
+
+	/*
+	 * XXX KEBE SAYS CHEESY SHELL-OUT for now!
+	 * Eventually "nicname" should be something more tangible like a
+	 * pointer to a vxlan struct with things.  And "vid" should come
+	 * from the associated vlan that's over it.
+	 */
+	/*
+	 * XXX KEBE SCREAMS:  Dammit you can't do ::ffff:<v4> in the Linux
+	 * fdb dst!!!
+	 */
+	assert(addr[10] == addr[11] && addr[10] == 0xff);
+	/* Will need root privileges to make this happen. */
+	(void) snprintf(cmd, sizeof (buf), "bridge fdb replace "
+	    "%x:%x:%x:%x:%x:%x dev %s vlan %d dst %d.%d.%d.%d", mac[0], mac[1],
+	    mac[2], mac[3], mac[4], mac[5], (nicname == NULL) ?
+	    "rushvxlan0" : nicname, (vid == 0) ? 4 : vid, addr[12], addr[13],
+	    addr[14], addr[15]);
+
+	/* XXX KEBE SAYS here's the cheese. */
+	if (system(cmd) == -1)
+		err(-21, "set_overlay_mac(): system()");
 }
 
 static void
-set_overlay_ip(uint8_t *ip, uint8_t *mac)
+set_overlay_ip(uint8_t *ip, uint8_t *mac, char *nicname)
 {
+	char buf[1024];
+	char *cmd = buf;
+
 	warn("Setting IP!");
+
+	/*
+	 * XXX KEBE SAYS CHEESY SHELL-OUT for now!
+	 * Eventually "nicname" should be something more tangible like a
+	 * pointer to a vlan struct with things.
+	 */
+	/*
+	 * XXX KEBE SCREAMS:  Dammit you can do ::ffff:<v4> in the Linux
+	 * ip dst, BUT IT DOES NOT TREAT IT AS A REGULAR IPV4!!!
+	 */
+	assert(ip[10] == ip[11] && ip[10] == 0xff);
+	/* Use "nud reachable" so we aren't being permanent, the default. */
+	(void) snprintf(cmd, sizeof (buf), "ip neigh replace %d.%d.%d.%d "
+	    "lladdr %x:%x:%x:%x:%x:%x dev %s nud reachable", ip[12], ip[13],
+	    ip[14], ip[15], mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+	    (nicname == NULL) ? "rushvlan0" : nicname);
+
+	/* XXX KEBE SAYS here's the cheese. */
+	if (system(buf) == -1)
+		err(-21, "set_overlay_ip(): system()");
 }
 
 int
@@ -325,7 +375,7 @@ handle_svp_inbound(int svp_fd)
 	case SVP_R_VL2_ACK:
 		if (status_check(svprr->svprr_l2a_status)) {
 			set_overlay_mac(svpt->svpt_rr.svprr_l2r_mac,
-			    &svprr->svprr_l2a_port, svprr->svprr_l2a_ip);
+			    svprr->svprr_l2a_ip, NULL, 0);
 		}
 		break;
 	case SVP_R_VL3_ACK:
@@ -340,8 +390,8 @@ handle_svp_inbound(int svp_fd)
 		if (!status_check(svprr->svprr_l3a_status))
 			break;
 
-		set_overlay_mac(svprr->svprr_l3a_mac, &svprr->svprr_l3a_port,
-		    svprr->svprr_l3a_ip);
+		set_overlay_mac(svprr->svprr_l3a_mac, svprr->svprr_l3a_ip,
+		    NULL, 0);
 		if (svpt->svpt_rr.svprr_l3r_type == ntohl(SVP_VL3_IP)) {
 			assert(
 			    IN6_IS_ADDR_V4MAPPED(svpt->svpt_rr.svprr_l3r_ip));
@@ -351,7 +401,7 @@ handle_svp_inbound(int svp_fd)
 			    !IN6_IS_ADDR_V4MAPPED(svpt->svpt_rr.svprr_l3r_ip));
 		}
 		set_overlay_ip(svpt->svpt_rr.svprr_l3r_ip,
-		    svprr->svprr_l3a_mac);
+		    svprr->svprr_l3a_mac, NULL);
 		break;
 	default:
 		errx(-15, "handle_svp_inbound(): Should never reach, ack 0x%x "
