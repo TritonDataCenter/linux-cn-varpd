@@ -126,7 +126,7 @@ handle_netlink_inbound(int netlink_fd)
 		/* Right now assume NUD_INCOMPLETE is our only trigger. */
 		if (ndm->ndm_state != NUD_INCOMPLETE) {
 			/* Handle better? */
-			warn("Unknown ndm_state 0x%x\n", ndm->ndm_state);
+			warn("Unknown ndm_state 0x%x", ndm->ndm_state);
 			return;
 		}
 		/* Right now assume NDA_DST is our only trigger. */
