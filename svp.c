@@ -362,6 +362,13 @@ handle_svp_inbound(int svp_fd)
 	free(svpt);	/* We're done with the outstanding transaction. */
 }
 
+uint32_t
+index_to_vnetid(int32_t index)
+{
+	/* XXX KEBE SAYS FOR NOW JUST RETURN A HARDWIRED VALUE! */
+	return (4385813);
+}
+
 /*
  * Send an SVP_R_VL3_REQ
  */
@@ -386,9 +393,7 @@ send_l3_req(int32_t index, uint8_t af, uint8_t *addr)
 	svprr->svprr_id = our_svp_id++;
 
 	memcpy(svprr->svprr_l3r_ip, addr, sizeof (struct in6_addr));
-	/* Uggh, KEBE SAYS need index-to-vnetid, or passed in vnetid. */
-	svprr->svprr_l3r_vnetid = htonl(4385813); /* Hardcode for now... */
-	/* svprr->svprr_l3r_vnetid = index_to_vnetid(index); */
+	svprr->svprr_l3r_vnetid = htonl(index_to_vnetid(index));
 	svprr->svprr_l3r_type = (af == AF_INET6) ?
 	    htons(SVP_VL3_IPV6) : htonl(SVP_VL3_IP);
 	svprr->svprr_crc32 = 0;
