@@ -180,8 +180,8 @@ set_overlay_mac(uint8_t *mac, uint8_t *addr, char *nicname, uint16_t vid)
 	(void) snprintf(cmd, sizeof (buf), "bridge fdb replace "
 	    "%x:%x:%x:%x:%x:%x dev %s vlan %d dst %d.%d.%d.%d", mac[0], mac[1],
 	    mac[2], mac[3], mac[4], mac[5], (nicname == NULL) ?
-	    "rushvxlan0" : nicname, (vid == 0) ? 4 : vid, addr[12], addr[13],
-	    addr[14], addr[15]);
+	    "sdcvxl4385813" : nicname, (vid == 0) ? 4 : vid, addr[12],
+	    addr[13], addr[14], addr[15]);
 
 	/* XXX KEBE SAYS here's the cheese. */
 	if (system(cmd) == -1)
@@ -210,7 +210,7 @@ set_overlay_ip(uint8_t *ip, uint8_t *mac, char *nicname)
 	(void) snprintf(cmd, sizeof (buf), "ip neigh replace %d.%d.%d.%d "
 	    "lladdr %x:%x:%x:%x:%x:%x dev %s nud reachable", ip[12], ip[13],
 	    ip[14], ip[15], mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-	    (nicname == NULL) ? "rushvlan0" : nicname);
+	    (nicname == NULL) ? "vx4385813v4" : nicname);
 
 	/* XXX KEBE SAYS here's the cheese. */
 	if (system(buf) == -1)
