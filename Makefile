@@ -8,15 +8,16 @@
 # Copyright 2023 MNX Cloud, Inc.
 #
 
-OBJECTS = link.o main.o svp.o
+OBJECTS = link.o main.o svp.o strlcpy.o
 
 CFLAGS += -m64 -Wall
-# CFLAGS += -g
+#DEBUGFLAGS = -g
+CFLAGS += $(DEBUGFLAGS)
 
 all: varpd
 
 varpd: $(OBJECTS)
-	cc -o varpd *.o
+	cc $(DEBUGFLAGS) -o varpd *.o
 
 $(OBJECTS): %.o: %.c
 

@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <err.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <poll.h>
@@ -33,15 +34,19 @@ usage(const char *prog)
 	exit(1);
 }
 
+static bool processed_sighup;
+
 static void
 do_sighup(int sig)
 {
 	if (sig != SIGHUP)
 		errx(-1, "WTF signal-handler?!?\n");
 
-	/* XXX KEBE WARNS, MAYBE CHECK FOR OUTSTANDING SVP TRANSACTIONS... */
+	if (processed_sighup)
+		warn("do_sighup() again entered before we cleared things\n");
 
-	replumb_links(nicfile);
+	scan_triton_fabrics(false);
+	processed_sighup = true;
 }
 
 /* Keep this global... */
@@ -91,9 +96,7 @@ main(int argc, char *argv[])
 		usage(argv[0]);
 	}
 
-	/* Read "nicfile" and plumb nics. */
-	if (!plumb_links(nicfile))
-		errx(-1, "plumb_links() failed.\n");
+	scan_triton_fabrics(true);
 
 	/*
 	 * Because of multiple failure modes, new_svp() will print
@@ -124,8 +127,22 @@ main(int argc, char *argv[])
 	fds[1].revents = 0;
 	do {
 		pollrc = poll(fds, 2, 60);	/* 60sec timeout? */
-		if (pollrc <= 0)
+		/* Treat 0 as nothing's wrong... */
+		if (pollrc < 0 && errno == EINTR) {
+			if (processed_sighup) {
+				/* Clear errno... */
+				errno = 0;
+				processed_sighup = false;
+				pollrc = 0; /* Keep looping! */
+			} else {
+				/*
+				 * For now, exit program with pollrc
+				 * == -1.
+				 */
+				warn("DANGER processed_signup FALSE!");
+			}
 			continue;	/* Will hit while-end and stop if -1. */
+		}
 		/* svp_fd */
 		if (fds[0].revents != 0) {
 			handle_svp_inbound(svp_fd);

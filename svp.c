@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <netinet/in.h>
 
+#include "link.h"
 #include "svp.h"
 #include "crc32.h"
 
@@ -78,9 +79,10 @@ typedef struct svp_transaction {
 
 	/* XXX END LINKAGE XXX */
 	svp_remotereq_t svpt_rr;
-	int32_t svpt_index;
+	struct fabric_link_s *svpt_link;
 } svp_transaction_t;
 #define	svpt_id svpt_rr.svprr_head.svp_id
+#define	svpt_index svpt_link->fl_id
 
 static uint32_t svp_crc32_tab[] = { CRC32_TABLE };
 
@@ -167,21 +169,18 @@ set_overlay_mac(uint8_t *mac, uint8_t *addr, char *nicname, uint16_t vid)
 
 	/*
 	 * XXX KEBE SAYS CHEESY SHELL-OUT for now!
-	 * Eventually "nicname" should be something more tangible like a
-	 * pointer to a vxlan struct with things.  And "vid" should come
-	 * from the associated vlan that's over it.
 	 */
 	/*
 	 * XXX KEBE SCREAMS:  Dammit you can't do ::ffff:<v4> in the Linux
 	 * fdb dst!!!
 	 */
 	assert(addr[10] == addr[11] && addr[10] == 0xff);
+	/* XXX KEBE ASKS what if vid == 0? */
 	/* Will need root privileges to make this happen. */
 	(void) snprintf(cmd, sizeof (buf), "bridge fdb replace "
 	    "%x:%x:%x:%x:%x:%x dev %s vlan %d dst %d.%d.%d.%d", mac[0], mac[1],
-	    mac[2], mac[3], mac[4], mac[5], (nicname == NULL) ?
-	    "sdcvxl4385813" : nicname, (vid == 0) ? 4 : vid, addr[12],
-	    addr[13], addr[14], addr[15]);
+	    mac[2], mac[3], mac[4], mac[5], nicname, vid, addr[12],  addr[13],
+	    addr[14], addr[15]);
 
 	/* XXX KEBE SAYS here's the cheese. */
 	if (system(cmd) == -1)
@@ -374,8 +373,13 @@ handle_svp_inbound(int svp_fd)
 	switch (ntohs(svp_req->svp_op)) {
 	case SVP_R_VL2_ACK:
 		if (status_check(svprr->svprr_l2a_status)) {
+			/*
+			 * Only the vxlan device should ask for VL2-type
+			 * requests.
+			 */
+			assert(svpt->svpt_link->fl_vxlan == NULL);
 			set_overlay_mac(svpt->svpt_rr.svprr_l2r_mac,
-			    svprr->svprr_l2a_ip, NULL, 0);
+			    svprr->svprr_l2a_ip, svpt->svpt_link->fl_name, 0);
 		}
 		break;
 	case SVP_R_VL3_ACK:
@@ -390,8 +394,14 @@ handle_svp_inbound(int svp_fd)
 		if (!status_check(svprr->svprr_l3a_status))
 			break;
 
+		/*
+		 * Only the vlan-over-vxlan device should ask for VL3-type
+		 * requests.
+		 */
+		assert(svpt->svpt_link->fl_vxlan != NULL);
+
 		set_overlay_mac(svprr->svprr_l3a_mac, svprr->svprr_l3a_ip,
-		    NULL, 0);
+		    svpt->svpt_link->fl_vxlan->fl_name, svpt->svpt_link->fl_id);
 		if (svpt->svpt_rr.svprr_l3r_type == ntohl(SVP_VL3_IP)) {
 			assert(
 			    IN6_IS_ADDR_V4MAPPED(svpt->svpt_rr.svprr_l3r_ip));
@@ -401,7 +411,7 @@ handle_svp_inbound(int svp_fd)
 			    !IN6_IS_ADDR_V4MAPPED(svpt->svpt_rr.svprr_l3r_ip));
 		}
 		set_overlay_ip(svpt->svpt_rr.svprr_l3r_ip,
-		    svprr->svprr_l3a_mac, NULL);
+		    svprr->svprr_l3a_mac, svpt->svpt_link->fl_name);
 		break;
 	default:
 		errx(-15, "handle_svp_inbound(): Should never reach, ack 0x%x "
@@ -412,13 +422,6 @@ handle_svp_inbound(int svp_fd)
 	free(svpt);	/* We're done with the outstanding transaction. */
 }
 
-uint32_t
-index_to_vnetid(int32_t index)
-{
-	/* XXX KEBE SAYS FOR NOW JUST RETURN A HARDWIRED VALUE! */
-	return (4385813);
-}
-
 /*
  * Send an SVP_R_VL3_REQ
  */
@@ -427,12 +430,27 @@ send_l3_req(int32_t index, uint8_t af, uint8_t *addr)
 {
 	svp_transaction_t *svpt;
 	svp_remotereq_t *svprr;
+	fabric_link_t *link = index_to_link(index);
 
+	if (link == NULL) {
+		/*
+		 * We don't have record of this link.  This should only
+		 * happen in practice if some other odd link type is
+		 * emitting messages OR a new one plumbed up and we haven't
+		 * loaded it in yet because this RTM_GETNEIGH hit us first.
+		 *
+		 * For now, just return.
+		 */
+		warnx("index %d had no internal link state.", index);
+		return;
+	}
+
+	assert(link->fl_vxlan != NULL);	/* MUST be a vlan-over-vxlan */
 	svpt = calloc(1, sizeof (*svpt));
 	if (svpt == NULL)
 		errx(-10, "send_l3_req() - allocation failed\n");
 
-	svpt->svpt_index = index;
+	svpt->svpt_link = link;
 	svprr = &svpt->svpt_rr;
 
 	svprr->svprr_ver = htons(SVP_CURRENT_VERSION);
@@ -443,7 +461,7 @@ send_l3_req(int32_t index, uint8_t af, uint8_t *addr)
 	svprr->svprr_id = our_svp_id++;
 
 	memcpy(svprr->svprr_l3r_ip, addr, sizeof (struct in6_addr));
-	svprr->svprr_l3r_vnetid = htonl(index_to_vnetid(index));
+	svprr->svprr_l3r_vnetid = htonl(link->fl_vxlan->fl_id);
 	svprr->svprr_l3r_type = (af == AF_INET6) ?
 	    htons(SVP_VL3_IPV6) : htonl(SVP_VL3_IP);
 	svprr->svprr_crc32 = 0;

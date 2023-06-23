@@ -9,11 +9,19 @@
  */
 
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <assert.h>
+#include <fcntl.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <err.h>
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 
 #include <linux/sockios.h>
 #include <linux/if.h>
@@ -24,19 +32,236 @@
 #include "svp.h"
 #include "link.h"
 
-bool
-plumb_links(const char *filename)
+#define	LINUX_SYSFS_VNICS "/sys/devices/virtual/net"
+#define	LINUX_PROCFS_VNICS_IPV4 "/proc/sys/net/ipv4/neigh"
+#define	LINUX_PROCFS_VNICS_IPV6 "/proc/sys/net/ipv4/neigh"
+
+static int32_t linktab_size = 0;	/* Same range as ifindex */
+static fabric_link_t **linktab = NULL;
+#define	LINKTAB_START_SIZE 64
+
+static void
+resize_linktab(int32_t newsize)
 {
-	return (true);	/* XXX KEBE SAYS placeholder */
+	fabric_link_t **newtab;
+	size_t index;
+
+	if (newsize <= linktab_size)
+		return;	/* Never shrink. */
+	if (newsize < 0) {
+		errno = ERANGE;
+		errx(-36, "new linktab size too big\n");
+	}
+
+	newtab = realloc(linktab, sizeof (fabric_link_t *) * newsize);
+	if (newtab == NULL)
+		errx(-30, "Can't grow linktab!");
+	linktab = newtab;
+
+	for (index = linktab_size; index < newsize; index++)
+		newtab[index] = NULL;
+	linktab_size = newsize;
+}
+
+static fabric_link_t *
+update_link_entry(fabric_link_t *parent, const char *name, int32_t index,
+	uint32_t id)
+{
+	fabric_link_t *dst;
+
+	/* A while loop on the off chance we need to more-than-double. */
+	while (index >= linktab_size) {
+		errno = 0;
+		warnx("Index %d forcing resize from %d to %d", index,
+		    linktab_size, linktab_size * 2);
+		resize_linktab(linktab_size * 2);
+	}
+
+	if (linktab[index] == NULL) {
+		/* Just allocate, fill, and return. */
+		dst = malloc(sizeof (*dst));
+		if (dst == NULL)
+			errx(-34, "Can't allocate new linktab entry!");
+		linktab[index] = dst;
+		dst->fl_vxlan = parent; /* Might be NULL... */
+		dst->fl_ifindex = index;
+		dst->fl_id = id;
+		if (strlcpy(dst->fl_name, name, sizeof (dst->fl_name)) >=
+		    sizeof (dst->fl_name)) {
+			errno = EINVAL;
+			errx(-35, "Oh wow, name(%s) is longer (%lu) than %lu",
+			    name, strlen(name), sizeof (dst->fl_name));
+		}
+		return (dst);
+	}
+
+	dst = linktab[index];
+
+	/*
+	 * Verify things? Can use strcmp() because we have initialized ours
+	 * properly.
+	 */
+	/*
+	 * XXX KEBE ASKS do we ever think we'll change things w/o bumping the
+	 * ifindex?
+	 */
+	if (dst->fl_vxlan != parent || dst->fl_ifindex != index ||
+	    dst->fl_id != id || strcmp(dst->fl_name, name) != 0) {
+		errno = EINVAL;
+		err(-37, "OH NO MISMATCH");
+	}
+
+	return (dst);
+}
+
+static int32_t
+nicdir_to_index(int nicfd)
+{
+	int indexfd;
+	ssize_t indexlen;
+	char indexstr[11];
+	long index;
+
+	indexfd = openat(nicfd, "ifindex", O_RDONLY);
+	if (indexfd == -1)
+		errx(-35, "openat(ifindex)");
+	indexlen = read(indexfd, indexstr, sizeof (indexstr));
+	if (indexlen == -1)
+		errx(-35, "read(ifindex)");
+	assert(indexstr[indexlen - 1] == '\n');
+	indexstr[indexlen - 1] = '\0';
+	errno = 0;
+	index = strtol(indexstr, NULL, 10);
+	if (errno != 0)
+		errx(-35, "strtol(index)");
+	/* Cheesy... */
+	return ((int32_t)index);
 }
 
 void
-replumb_links(const char *filename)
+scan_triton_fabrics(bool startup)
 {
-	/* XXX KEBE SAYS quiesce things... */
+	DIR *sysfsd;
+	struct dirent *vxlan;
 
-	if (!plumb_links(filename))
-		errx(-1, "plumb_links() failed.\n");
+	if (startup)
+		resize_linktab(LINKTAB_START_SIZE);
+
+	/*
+	 * XXX KEBE ASKS if not startup, maybe need to check outstanding
+	 * transactions for index values that no longer exist?
+	 *
+	 * It appears that linux ifindex values don't replace, they just
+	 * monotonically increase.  For a long-lived CN with lots of
+	 * bringups/teardowns I worry a bit, but let's assume MAX_INT32
+	 * (0x7fffffff) is sufficient for now.
+	 */
+
+	sysfsd = opendir(LINUX_SYSFS_VNICS);
+	if (sysfsd == NULL)
+		errx(-22, "opendir(%s)", LINUX_SYSFS_VNICS);
+
+	/* Okay, let's iterate... */
+	errno = 0;	/* Start clean... */
+	for (vxlan = readdir(sysfsd); vxlan != NULL; vxlan = readdir(sysfsd)) {
+		DIR *vxland;
+		struct dirent *uppers;
+		int vxlanfd;
+		uint32_t vnetid;
+		int32_t index;
+		fabric_link_t *vxlanlink;
+
+		/*
+		 * If sdcvxl*:
+		 * - record $(dirent)/ifindex, name, .
+		 */
+		if (strncmp("sdcvxl", vxlan->d_name, 6) != 0)
+			continue;
+		vnetid = (uint32_t)strtoul(&(vxlan->d_name[6]), NULL, 10);
+		if (vnetid == 0 || vnetid >= (16 * 1024 * 1024)) {
+			warn("Parsing error on %s, got %u", vxlan->d_name,
+			    vnetid);
+			continue;
+		}
+		vxlanfd = openat(dirfd(sysfsd), vxlan->d_name, O_RDONLY);
+		if (vxlanfd == -1) {
+			warnx("openat(%s/%s) failed, continuing",
+			    LINUX_SYSFS_VNICS, vxlan->d_name);
+			continue;
+		}
+		vxland = fdopendir(vxlanfd);
+		if (vxland == NULL) {
+			warnx("fdopendir(%s/%s) failed, continuing",
+			    LINUX_SYSFS_VNICS, vxlan->d_name);
+			(void) close(vxlanfd);
+		}
+		/*
+		 * Both nicdir_to_index() and update_link_entry() will bail on
+		 * failure. If libc internals do bizarre things with vxlanfd,
+		 * use dirfd() to be safe.
+		 */
+		index = nicdir_to_index(dirfd(vxland));
+		vxlanlink =
+		    update_link_entry(NULL, vxlan->d_name, index, vnetid);
+
+		/* Find the lower layers. */
+		for (uppers = readdir(vxland); uppers != NULL ;
+		    uppers = readdir(vxland)) {
+			uint32_t vid;
+			int32_t vlanindex;
+			char *vidstr;
+			int vlanfd;
+
+			/*
+			 * - scan upper_* and hang 'em off
+			 */
+			if (strncmp("upper_vx", uppers->d_name, 8) != 0)
+				continue;
+			for (vidstr = &(uppers->d_name[8]); *vidstr != 'v';
+			    vidstr++) {
+			}
+			vid = (uint32_t)strtoul(++vidstr, NULL, 10);
+			if (vid == 0 || vid >= 1024) {
+				warn("Parsing error on %s: got %u",
+				    uppers->d_name, vid);
+				continue;
+			}
+			vlanfd = openat(dirfd(vxland), uppers->d_name,
+			    O_RDONLY);
+			if (vlanfd == -1) {
+				warnx("openat(.../%s) failed, continuing",
+				    uppers->d_name);
+				continue;
+			}
+			vlanindex = nicdir_to_index(vlanfd);
+			/*
+			 * Both nicdir_to_index() and update_link_entry() will
+			 * bail on failure.
+			 *
+			 * Skip "upper_" part for name.
+			 */
+			(void) update_link_entry(vxlanlink,
+			    &(uppers->d_name[6]), vlanindex, vid);
+			if (close(vlanfd) == -1)
+				errx(-32, "close(vlanfd)");
+		}
+		closedir(vxland);
+	}
+	if (vxlan != NULL || errno != 0)
+		errx(-23, "readdir()");
+	
+}
+
+fabric_link_t *
+index_to_link(int32_t index)
+{
+	if (index >= linktab_size) {
+		warnx("Index %d exceeds current table size %d", index,
+		    linktab_size);
+		return (NULL);
+	}
+
+	return (linktab[index]);
 }
 
 int
@@ -76,7 +301,7 @@ new_netlink(void)
 void
 handle_netlink_inbound(int netlink_fd)
 {
-	uint8_t buf[1024];
+	uint8_t buf[4096];
 	uint8_t *readspot = buf, *endspot;
 	struct nlmsghdr *nlmsg = (struct nlmsghdr *)readspot;
 	struct ndmsg *ndm;
@@ -94,7 +319,7 @@ handle_netlink_inbound(int netlink_fd)
 
 	if (recvsize != nlmsg->nlmsg_len) {
 		warn("DANGER: recvsize %ld != nlmsg_len %d, "
-		    "continuing...\n", recvsize, nlmsg->nlmsg_len);
+		    "dropping...\n", recvsize, nlmsg->nlmsg_len);
 		/* Continue for now... */
 	}
 	endspot = readspot;
@@ -122,9 +347,15 @@ handle_netlink_inbound(int netlink_fd)
 		/* Only cope with these address requests... */
 		if (ndm->ndm_family != AF_INET && ndm->ndm_family != AF_INET6 &&
 		    ndm->ndm_family != AF_PACKET) {
+			warn("Unkown ndm_family %d", ndm->ndm_family);
+			return;
 		}
-		/* Right now assume NUD_INCOMPLETE is our only trigger. */
-		if (ndm->ndm_state != NUD_INCOMPLETE) {
+		/*
+		 * Trigger SVP requests for both incomplete AND probe.
+		 * XXX KEBE SAYS need to handle failures on both better.
+		 */
+		if (ndm->ndm_state != NUD_INCOMPLETE &&
+		    ndm->ndm_state != NUD_PROBE) {
 			/* Handle better? */
 			warn("Unknown ndm_state 0x%x", ndm->ndm_state);
 			return;
@@ -193,6 +424,14 @@ handle_netlink_inbound(int netlink_fd)
 		}
 		break;
 	case RTM_NEWNEIGH:
+		break;
+	case RTM_NEWLINK:
+	case RTM_DELLINK:
+		/*
+		 * Just rescan for now, but maybe call update_link_entry
+		 * directly with message parms?
+		 */
+		scan_triton_fabrics(false);
 		break;
 	default:
 		/*
