@@ -114,6 +114,29 @@ update_link_entry(fabric_link_t *parent, const char *name, int32_t index,
 	return (dst);
 }
 
+/*
+ * This function assumes only one entry matching "lower_prefix" is present.
+ * If a link directory has more than one, we're in a WORLD of hurt.
+ */
+static struct dirent *
+find_one_type(DIR *linkdir, const char *lower_prefix)
+{
+	struct dirent *foundit;
+	size_t plen = strlen(lower_prefix);
+
+	for (foundit = readdir(linkdir); foundit != NULL;
+	    foundit = readdir(linkdir)) {
+		if (strncmp(lower_prefix, foundit->d_name, plen) == 0)
+			break;
+	}
+
+	if (foundit == NULL) {
+		errno = ENOENT;
+		errx(-41, "Can't find %s entry", lower_prefix);
+	}
+	return (foundit);
+}
+
 static int32_t
 nicdir_to_index(int nicfd)
 {
@@ -138,11 +161,77 @@ nicdir_to_index(int nicfd)
 	return ((int32_t)index);
 }
 
+/*
+ * Chase down the levels of indirection:
+ *
+ *	fabricN -->  vx<vnetid>v<vid> --> sdcvxl<vnetid>
+ *
+ * Return the fabric_link_t for the vx<vnetid>v<vid>, which provides
+ * enough context for the caller to populate a fabricN which is over
+ * the vlan fabric link.
+ */
+static fabric_link_t *
+chase_down(DIR *fabricd)
+{
+	struct dirent *vlan, *vxlan;
+	DIR *vland;
+	int vlanfd, vxlanfd;
+	int32_t vlanindex, vxlanindex;
+	fabric_link_t *vlan_fl, *vxlan_fl;
+	uint32_t vlan_id, vxlan_id;
+
+	vlan = find_one_type(fabricd, "lower_vx"); /* Bails on failure. */
+
+	/* "vlan" now is an lower_vx*, start the chase. */
+	vlanfd = openat(dirfd(fabricd), vlan->d_name, O_RDONLY);
+	if (vlanfd == -1)
+		errx(-40, "openat(%s) failed, bailing.", vlan->d_name);
+
+	vlanindex = nicdir_to_index(vlanfd); /* Bails on failure. */
+	vlan_fl = index_to_link(vlanindex);
+	if (vlan_fl != NULL) {
+		/* Easy path. Both vlan and vxlan have been scanned. */
+		assert(vlan_fl->fl_vxlan != NULL);
+		(void) close(vlanfd);
+		return (vlan_fl);
+	}
+	/* Cheesy attempt to make this work. */
+	(void) sscanf(vlan->d_name, "lower_vx%uv%u", &vxlan_id, &vlan_id);
+	warnx("Nic symlink %s gave us vnetid=%u, vid=%u", vlan->d_name,
+	    vxlan_id, vlan_id);
+
+	/* At this point we MIGHT have a VXLAN recorded, let's see. */
+	vland = fdopendir(vlanfd);
+	if (vland == NULL)
+		errx(-41, "fdopendir(%s) failed, bailing.", vlan->d_name);
+
+	vxlan = find_one_type(vland, "lower_sdcvxl"); /* Bails on failure. */
+
+	/* "vxlan" now is an lower_sdcvxl*, continue the chase. */
+	vxlanfd = openat(dirfd(vland), vxlan->d_name, O_RDONLY);
+	if (vxlanfd == -1)
+		errx(-40, "2nd openat(%s) failed, bailing.", vxlan->d_name);
+
+	vxlanindex = nicdir_to_index(vxlanfd); /* Bails on failure. */
+	(void) close(vxlanfd);
+	vxlan_fl = index_to_link(vxlanindex);
+	if (vxlan_fl == NULL) {
+		/* Shoot, we gotta initialize this first. */
+		vxlan_fl = update_link_entry(NULL, &(vxlan->d_name[12]),
+		    vxlanindex, vxlan_id);
+	}
+	vlan_fl = update_link_entry(vxlan_fl, &(vlan->d_name[8]), vlanindex,
+	    vlan_id);
+
+	closedir(vland);
+	return (vlan_fl);
+}
+
 void
 scan_triton_fabrics(bool startup)
 {
 	DIR *sysfsd;
-	struct dirent *vxlan;
+	struct dirent *fabric;
 
 	if (startup)
 		resize_linktab(LINKTAB_START_SIZE);
@@ -163,93 +252,54 @@ scan_triton_fabrics(bool startup)
 
 	/* Okay, let's iterate... */
 	errno = 0;	/* Start clean... */
-	for (vxlan = readdir(sysfsd); vxlan != NULL; vxlan = readdir(sysfsd)) {
-		DIR *vxland;
-		struct dirent *uppers;
-		int vxlanfd;
-		uint32_t vnetid;
+	for (fabric = readdir(sysfsd); fabric != NULL;
+	    fabric = readdir(sysfsd)) {
 		int32_t index;
-		fabric_link_t *vxlanlink;
+		int fabricfd;
+		DIR *fabricd;
+		fabric_link_t *vlanlink, *fabriclink;
 
-		/*
-		 * If sdcvxl*:
-		 * - record $(dirent)/ifindex, name, .
-		 */
-		if (strncmp("sdcvxl", vxlan->d_name, 6) != 0)
+		/* Only process fabricN */
+		if (strncmp("fabric", fabric->d_name, 6) != 0)
 			continue;
-		vnetid = (uint32_t)strtoul(&(vxlan->d_name[6]), NULL, 10);
-		if (vnetid == 0 || vnetid >= (16 * 1024 * 1024)) {
-			warn("Parsing error on %s, got %u", vxlan->d_name,
-			    vnetid);
-			continue;
-		}
-		vxlanfd = openat(dirfd(sysfsd), vxlan->d_name, O_RDONLY);
-		if (vxlanfd == -1) {
+
+		fabricfd = openat(dirfd(sysfsd), fabric->d_name, O_RDONLY);
+		if (fabricfd == -1) {
 			warnx("openat(%s/%s) failed, continuing",
-			    LINUX_SYSFS_VNICS, vxlan->d_name);
+			    LINUX_SYSFS_VNICS, fabric->d_name);
 			continue;
 		}
-		vxland = fdopendir(vxlanfd);
-		if (vxland == NULL) {
+		fabricd = fdopendir(fabricfd);
+		if (fabricd == NULL) {
 			warnx("fdopendir(%s/%s) failed, continuing",
-			    LINUX_SYSFS_VNICS, vxlan->d_name);
-			(void) close(vxlanfd);
+			    LINUX_SYSFS_VNICS, fabric->d_name);
+			(void) close(fabricfd);
+			continue;
 		}
+
 		/*
-		 * Both nicdir_to_index() and update_link_entry() will bail on
-		 * failure. If libc internals do bizarre things with vxlanfd,
-		 * use dirfd() to be safe.
+		 * nicdir_to_index() will bail on failure. If libc internals
+		 * do bizarre things with fabricd, use dirfd() to be safe.
 		 */
-		index = nicdir_to_index(dirfd(vxland));
-		vxlanlink =
-		    update_link_entry(NULL, vxlan->d_name, index, vnetid);
+		index = nicdir_to_index(dirfd(fabricd));
+		warnx("Initializing %s", fabric->d_name);
 
-		/* Find the lower layers. */
-		for (uppers = readdir(vxland); uppers != NULL ;
-		    uppers = readdir(vxland)) {
-			uint32_t vid;
-			int32_t vlanindex;
-			char *vidstr;
-			int vlanfd;
+		/*
+		 * Chase down to vlan (vx<vnet>v<vid>) and fabric
+		 * (sdcvxlan<vnet>) and return the vlan fabric_link_t, which
+		 * gives us enough to run with.  Will also bail on failure.
+		 */
+		vlanlink = chase_down(fabricd);
+		assert(vlanlink != NULL);
 
-			/*
-			 * - scan upper_* and hang 'em off
-			 */
-			if (strncmp("upper_vx", uppers->d_name, 8) != 0)
-				continue;
-			for (vidstr = &(uppers->d_name[8]); *vidstr != 'v';
-			    vidstr++) {
-			}
-			vid = (uint32_t)strtoul(++vidstr, NULL, 10);
-			if (vid == 0 || vid >= 1024) {
-				warn("Parsing error on %s: got %u",
-				    uppers->d_name, vid);
-				continue;
-			}
-			vlanfd = openat(dirfd(vxland), uppers->d_name,
-			    O_RDONLY);
-			if (vlanfd == -1) {
-				warnx("openat(.../%s) failed, continuing",
-				    uppers->d_name);
-				continue;
-			}
-			vlanindex = nicdir_to_index(vlanfd);
-			/*
-			 * Both nicdir_to_index() and update_link_entry() will
-			 * bail on failure.
-			 *
-			 * Skip "upper_" part for name.
-			 */
-			(void) update_link_entry(vxlanlink,
-			    &(uppers->d_name[6]), vlanindex, vid);
-			if (close(vlanfd) == -1)
-				errx(-32, "close(vlanfd)");
-		}
-		closedir(vxland);
+		fabriclink = update_link_entry(vlanlink->fl_vxlan,
+		    fabric->d_name, index, vlanlink->fl_id);
+		warnx("\tFabric link %s initialized", fabriclink->fl_name);
+		closedir(fabricd);
 	}
-	if (vxlan != NULL || errno != 0)
+
+	if (fabric != NULL || errno != 0)
 		errx(-23, "readdir()");
-	
 }
 
 fabric_link_t *
