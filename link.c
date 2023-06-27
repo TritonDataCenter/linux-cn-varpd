@@ -217,10 +217,10 @@ chase_down(DIR *fabricd)
 	vxlan_fl = index_to_link(vxlanindex);
 	if (vxlan_fl == NULL) {
 		/* Shoot, we gotta initialize this first. */
-		vxlan_fl = update_link_entry(NULL, &(vxlan->d_name[12]),
+		vxlan_fl = update_link_entry(NULL, &(vxlan->d_name[6]),
 		    vxlanindex, vxlan_id);
 	}
-	vlan_fl = update_link_entry(vxlan_fl, &(vlan->d_name[8]), vlanindex,
+	vlan_fl = update_link_entry(vxlan_fl, &(vlan->d_name[6]), vlanindex,
 	    vlan_id);
 
 	closedir(vland);
