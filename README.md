@@ -6,6 +6,8 @@ different entity (likely
 [`net-agent`](https://github.com/TritonDataCenter/sdc-net-agent)) will
 configure Linux links in a manner that this implementation can access.
 
+***THIS IS STILL A WORK IN PROGRESS***
+
 ## Linux link configuration
 
 ### VXLAN
