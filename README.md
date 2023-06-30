@@ -6,7 +6,9 @@ different entity (likely
 [`net-agent`](https://github.com/TritonDataCenter/sdc-net-agent)) will
 configure Linux links in a manner that this implementation can access.
 
-***THIS IS STILL A WORK IN PROGRESS***
+***THIS IS STILL A WORK IN PROGRESS. PRs and commits will be sloppy until a
+designated time where we start treating this like a proper Triton repo with
+Jira tickets and full reviews.***
 
 ## Linux link configuration
 
@@ -70,18 +72,18 @@ exists we can probably get even better control than what we have.
 ### RTM_GETNEIGH
 
 RTM_GETNEIGH messages for IPv4, IPv6, or Ethernet addresses on link-indexes
-we know to be a fabric link (see [Design Choices](Design Choices) below)
-trigger an SVP messages requesting a VL3 (Fabric IP) or a VL2 (Fabric MAC)
-address.  We check the flags for RTM_GETNEIGH to act on either new entries
+we know to be a fabric link (see [Other Design Choices](Other Design Choices)
+below) trigger an SVP messages requesting a VL3 (Fabric IP) or a VL2 (Fabric
+MAC) address.  We check the flags for RTM_GETNEIGH to act on either new entries
 or entries performing reachability probes.
 
 ### RTM_DELLINK
 
 RTM_DELLINK messages will cause varpd to destroy an index-to-fabric entry
-(see [Design Choices](Design Choices) below).  Experiments show that if a
-lower-layer link is removed, all of its upper links will be deleted, and send
-RTM_DELLINK messages as well.  E.g. removing a VXLAN link will remove all of
-the VLAN and Fabric links that depend on it.
+(see [Other Design Choices](Other Design Choices) below).  Experiments show
+that if a lower-layer link is removed, all of its upper links will be deleted,
+and send RTM_DELLINK messages as well.  E.g. removing a VXLAN link will remove
+all of the VLAN and Fabric links that depend on it.
 
 ### Other RTM_* messages
 
