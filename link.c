@@ -354,6 +354,7 @@ handle_netlink_inbound(int netlink_fd)
 	uint8_t buf[4096];
 	uint8_t *readspot = buf, *endspot;
 	struct nlmsghdr *nlmsg = (struct nlmsghdr *)readspot;
+	struct ifinfomsg *ifi;
 	struct ndmsg *ndm;
 	/* XXX KEBE ASKS overkill? Need we worry about more than one? */
 	struct rtattr *rtas[RTA_MAX] = { NULL };
@@ -387,12 +388,11 @@ handle_netlink_inbound(int netlink_fd)
 	switch (nlmsg->nlmsg_type) {
 	case RTM_GETNEIGH:
 		ndm = (struct ndmsg *)(nlmsg + 1);
-		/*
-		 * XXX KEBE SAYS reality-check index once we have a concept of
-		 * what established VXLAN and VLAN-over-VXLAN state we cache.
-		 */
 
-		/* Reality check other ndm fields. */
+		/*
+		 * Index without state will be handled gracefully
+		 * later. Meanwhile, reality check other ndm fields.
+		 */
 
 		/* Only cope with these address requests... */
 		if (ndm->ndm_family != AF_INET && ndm->ndm_family != AF_INET6 &&
@@ -474,14 +474,21 @@ handle_netlink_inbound(int netlink_fd)
 		}
 		break;
 	case RTM_NEWNEIGH:
+		/* XXX KEBE SAYS we may need to act on these. */
 		break;
-	case RTM_NEWLINK:
 	case RTM_DELLINK:
 		/*
-		 * Just rescan for now, but maybe call update_link_entry
-		 * directly with message parms?
+		 * Let's be naive for now, hope that our chains
+		 * all get distinctive RTM_DELLINK ones.
 		 */
-		scan_triton_fabrics(false);
+		ifi = (struct ifinfomsg *)(nlmsg + 1);
+		warn("Deleting & freeing ifindex %d", ifi->ifi_index);
+		/* Even if NULL, free(NULL) will work. */
+		free(linktab[ifi->ifi_index]);
+		linktab[ifi->ifi_index] = NULL;
+		break;
+	case RTM_NEWLINK:
+		/* XXX KEBE SAYS FILL ME IN... */
 		break;
 	default:
 		/*
