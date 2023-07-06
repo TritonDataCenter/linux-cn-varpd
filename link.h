@@ -27,7 +27,7 @@ typedef struct fabric_link_s {
 	uint32_t fl_id;			/* VID if vlan, vnetid if vxlan */
 } fabric_link_t;
 
-extern void scan_triton_fabrics(bool);
+extern void scan_triton_fabrics(const char *, int32_t);
 extern int new_netlink(void);
 extern void handle_netlink_inbound(int);
 extern fabric_link_t *index_to_link(int32_t);

@@ -228,13 +228,21 @@ chase_down(DIR *fabricd)
 }
 
 void
-scan_triton_fabrics(bool startup)
+scan_triton_fabrics(const char *onelink, int32_t onelink_index)
 {
 	DIR *sysfsd;
 	struct dirent *fabric;
 
-	if (startup)
+	if (linktab_size == 0)
 		resize_linktab(LINKTAB_START_SIZE);
+
+	/*
+	 * If we get a non-NULL onelink for something NOT a Triton Fabric,
+	 * be a NOP modulo initial resizing above.
+	 */
+	warnx("Scanning for: %s\n", (onelink == NULL) ? "ALL LINKS" : onelink);
+	if (onelink != NULL && strncmp("fabric", onelink, 6) != 0)
+		return;
 
 	/*
 	 * XXX KEBE ASKS if not startup, maybe need to check outstanding
@@ -259,9 +267,11 @@ scan_triton_fabrics(bool startup)
 		DIR *fabricd;
 		fabric_link_t *vlanlink, *fabriclink;
 
-		/* Only process fabricN */
-		if (strncmp("fabric", fabric->d_name, 6) != 0)
+		/* Only process fabricN, or exact match if specified. */
+		if (strncmp("fabric", fabric->d_name, 6) != 0 ||
+		    (onelink != NULL && strcmp(onelink, fabric->d_name) != 0)) {
 			continue;
+		}
 
 		fabricfd = openat(dirfd(sysfsd), fabric->d_name, O_RDONLY);
 		if (fabricfd == -1) {
@@ -280,8 +290,11 @@ scan_triton_fabrics(bool startup)
 		/*
 		 * nicdir_to_index() will bail on failure. If libc internals
 		 * do bizarre things with fabricd, use dirfd() to be safe.
+		 * Caller can provide us the index from the RTM_NEWLINK to
+		 * speed things along.
 		 */
-		index = nicdir_to_index(dirfd(fabricd));
+		index = (onelink != NULL) ? onelink_index:
+		    nicdir_to_index(dirfd(fabricd));
 		warnx("Initializing %s", fabric->d_name);
 
 		/*
@@ -296,10 +309,19 @@ scan_triton_fabrics(bool startup)
 		    fabric->d_name, index, vlanlink->fl_id);
 		warnx("\tFabric link %s initialized", fabriclink->fl_name);
 		closedir(fabricd);
+
+		/* If we found the one new link we need, stop scanning! */
+		if (onelink != NULL && strcmp(fabric->d_name, onelink) == 0) {
+			fabric = NULL;
+			errno = 0;
+			break;
+		}
 	}
 
 	if (fabric != NULL || errno != 0)
 		errx(-23, "readdir()");
+
+	closedir(sysfsd);
 }
 
 fabric_link_t *
@@ -406,8 +428,9 @@ handle_netlink_inbound(int netlink_fd)
 		 */
 		if (ndm->ndm_state != NUD_INCOMPLETE &&
 		    ndm->ndm_state != NUD_PROBE) {
-			/* Handle better? */
-			warn("Unknown ndm_state 0x%x", ndm->ndm_state);
+			/* Handle better? Ignore NUD_STALE outright for now. */
+			if (ndm->ndm_state != NUD_STALE)
+				warn("Unknown ndm_state 0x%x", ndm->ndm_state);
 			return;
 		}
 		/* Right now assume NDA_DST is our only trigger. */
@@ -424,9 +447,6 @@ handle_netlink_inbound(int netlink_fd)
 			struct rtattr *thisone = (struct rtattr *)readspot;
 
 			rtas[thisone->rta_type] = thisone;
-			warn("rta_type %d, rta_len = %d, advancing %u bytes",
-			    thisone->rta_type, thisone->rta_len,
-			    RTA_ALIGN(thisone->rta_len));
 			readspot += RTA_ALIGN(thisone->rta_len);
 		}
 
@@ -488,7 +508,28 @@ handle_netlink_inbound(int netlink_fd)
 		linktab[ifi->ifi_index] = NULL;
 		break;
 	case RTM_NEWLINK:
-		/* XXX KEBE SAYS FILL ME IN... */
+ 		/* If the ifi_change is all 1s, it's an actual new link. */
+		ifi = (struct ifinfomsg *)(nlmsg + 1);
+		if (ifi->ifi_change != 0xffffffff)
+			break;
+		readspot += sizeof (*nlmsg) + sizeof (*ifi);
+		while (readspot < endspot) {
+			struct rtattr *thisone = (struct rtattr *)readspot;
+
+			rtas[thisone->rta_type] = thisone;
+			readspot += RTA_ALIGN(thisone->rta_len);
+			/* We only really need to stop ot IFLA_IFNAME... */
+			if (thisone->rta_type == IFLA_IFNAME)
+				break;
+		}
+		if (rtas[IFLA_IFNAME] == NULL) {
+			warnx("WEIRD: RTM_NEWLINK w/o IFLA_IFNAME\n");
+		} else {
+			char *linkname = (char *)rtas[IFLA_IFNAME] +
+			    sizeof (struct rtattr);
+
+			scan_triton_fabrics(linkname, ifi->ifi_index);
+		}
 		break;
 	default:
 		/*

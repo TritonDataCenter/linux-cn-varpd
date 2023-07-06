@@ -45,7 +45,7 @@ do_sighup(int sig)
 	if (processed_sighup)
 		warn("do_sighup() again entered before we cleared things\n");
 
-	scan_triton_fabrics(false);
+	scan_triton_fabrics(NULL, 0);
 	processed_sighup = true;
 }
 
@@ -96,7 +96,7 @@ main(int argc, char *argv[])
 		usage(argv[0]);
 	}
 
-	scan_triton_fabrics(true);
+	scan_triton_fabrics(NULL, 0);
 
 	/*
 	 * Because of multiple failure modes, new_svp() will print
