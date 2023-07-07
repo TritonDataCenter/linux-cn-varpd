@@ -264,26 +264,35 @@ scan_triton_fabrics(const char *onelink, int32_t onelink_index)
 	    fabric = readdir(sysfsd)) {
 		int32_t index;
 		int fabricfd;
+		const char *openname;
 		DIR *fabricd;
 		fabric_link_t *vlanlink, *fabriclink;
 
-		/* Only process fabricN, or exact match if specified. */
-		if (strncmp("fabric", fabric->d_name, 6) != 0 ||
-		    (onelink != NULL && strcmp(onelink, fabric->d_name) != 0)) {
-			continue;
+		if (onelink != NULL) {
+			/* Don't bother looping, do it once and exit! */
+			openname = onelink;
+		} else {
+			/* Only process fabricN if unspecified. */
+			if (strncmp("fabric", fabric->d_name, 6) != 0)
+				continue;
+			openname = fabric->d_name;
 		}
 
-		fabricfd = openat(dirfd(sysfsd), fabric->d_name, O_RDONLY);
+		fabricfd = openat(dirfd(sysfsd), openname, O_RDONLY);
 		if (fabricfd == -1) {
 			warnx("openat(%s/%s) failed, continuing",
-			    LINUX_SYSFS_VNICS, fabric->d_name);
+			    LINUX_SYSFS_VNICS, openname);
+			if (openname == onelink)
+				break;	/* Out of for loop */
 			continue;
 		}
 		fabricd = fdopendir(fabricfd);
 		if (fabricd == NULL) {
 			warnx("fdopendir(%s/%s) failed, continuing",
-			    LINUX_SYSFS_VNICS, fabric->d_name);
+			    LINUX_SYSFS_VNICS, openname);
 			(void) close(fabricfd);
+			if (openname == onelink)
+				break;	/* Out of for loop */
 			continue;
 		}
 
@@ -295,7 +304,7 @@ scan_triton_fabrics(const char *onelink, int32_t onelink_index)
 		 */
 		index = (onelink != NULL) ? onelink_index:
 		    nicdir_to_index(dirfd(fabricd));
-		warnx("Initializing %s", fabric->d_name);
+		warnx("Initializing %s", openname);
 
 		/*
 		 * Chase down to vlan (vx<vnet>v<vid>) and fabric
@@ -305,15 +314,16 @@ scan_triton_fabrics(const char *onelink, int32_t onelink_index)
 		vlanlink = chase_down(fabricd);
 		assert(vlanlink != NULL);
 
-		fabriclink = update_link_entry(vlanlink->fl_vxlan,
-		    fabric->d_name, index, vlanlink->fl_id);
+		fabriclink = update_link_entry(vlanlink->fl_vxlan, openname,
+		    index, vlanlink->fl_id);
 		warnx("\tFabric link %s initialized", fabriclink->fl_name);
 		closedir(fabricd);
 
 		/* If we found the one new link we need, stop scanning! */
-		if (onelink != NULL && strcmp(fabric->d_name, onelink) == 0) {
-			fabric = NULL;
+		if (onelink != NULL) {
+			assert(onelink == openname);
 			errno = 0;
+			fabric = NULL;
 			break;
 		}
 	}
